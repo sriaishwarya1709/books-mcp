@@ -1,13 +1,17 @@
 from typing import Any, Dict, List
-from mcp.server.fastmcp import FastMCP
 import json
 import os
 
-# Initialize FastMCP server
+import uvicorn
+from mcp.server.fastmcp import FastMCP
+from mcp.server.streamable_http import TransportSecuritySettings
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+# ─── MCP server definition ────────────────────────────────────────────────────
 mcp = FastMCP(
     name="sample-mcp-server",
-    host="0.0.0.0",
-    port=8000,
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
 DATA_FILE = os.path.join(os.path.dirname(__file__), "books.json")
@@ -94,7 +98,25 @@ def get_all_books() -> Dict[str, Any]:
     return {"books": _load_books()}
 
 
-# ─── Entry point ─────────────────────────────────────────────────────────────
+# ─── Web host (what ACA needs) ───────────────────────────────────────────────
+# Use the MCP app as the root ASGI app so its lifespan (task group) is
+# properly initialized. Add a health check via middleware for ACA probes.
+# DNS rebinding protection is disabled in FastMCP settings above since
+# the server runs behind ACA's ingress proxy with a public FQDN.
+
+class _ACAPatchMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope.get("path") == "/":
+            response = JSONResponse({"status": "ok"})
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app = _ACAPatchMiddleware(mcp.streamable_http_app())
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", mount_path="/mcp")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
